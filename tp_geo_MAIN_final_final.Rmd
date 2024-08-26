@@ -1,0 +1,502 @@
+---
+title: "Análisis de los incendios forestales en córdoba entre septiembre y noviembre de 2023"
+author: "Facundo Solar y Pedro Ortiz"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+En el presente trabajo proponemos estudiar el impacto de los incendios forestales ocurridos durante el año pasado en Córdoba, más precisamente en las pedanías (una subdivisión de sus departamentos) de San Roque y Santiago, ambas pertenecientes al departamento de Punilla.
+
+Para la realización del estudio se utilizaron imágenes satelitales y datos geográficos provistos por el gobierno de la provincia de Córdoba. Luego se realizó un análisis propio utilizando bibliografía pertinente y visualizaciones para los análisis, enfocandosé en la creación de clusters espaciales.
+
+A continuación adjuntamos los links utilizados para obtener los datos:
+
+- [Datos de Córdoba, en formato shapefile](https://www.mapascordoba.gob.ar/#/descargas)
+- [Imágenes satelitales Landsat](https://earthexplorer.usgs.gov/)
+- [Bibliografía utilizada para el análisis - NBR](https://un-spider.org/advisory-support/recommended-practices/recommended-practice-burn-severity/in-detail/normalized-burn-ratio#)
+
+
+```{r}
+require(sf)
+require(dplyr)
+require(terra)
+require(tidyr)
+require(ggplot2)
+require(leaflet)
+require(spdep)
+require(mapview)
+require(cluster)
+```
+
+
+En primer lugar, se descargaron distintas imágenes satelitales de la misión landsat 9, tomadas durante los meses de Septiembre y Noviembre de 2023. El objetivo de esto fue el mismo del trabajo, es decir,realizar un análisis en el impacto del desastre natural en el terreno provincial, estos datos fueron elegidos bajo la hipotesis de que a la hora de analizar desastres naturales, y sus impactos, lo mejor sería observar imagenes del terreno.
+
+Luego de descargalos, notamos que los archivos landsat9 se obtienen en el siguiente formato:
+
+| Banda | Descripción              | Longitud de onda    | Resolución  |
+|-------|--------------------------|---------------------|-------------|
+| 1     | Visible aerosol costero   | 0.43 – 0.45 µm      | 30 metros   |
+| 2     | Azul                      | 0.450 – 0.51 µm     | 30 metros   |
+| 3     | Verde                     | 0.53 – 0.59 µm      | 30 metros   |
+| 4     | Rojo                      | 0.64 – 0.67 µm      | 30 metros   |
+| 5     | Infrarrojo cercano        | 0.85 – 0.88 µm      | 30 metros   |
+| 6     | SWIR 1                    | 1.57 – 1.65 µm      | 30 metros   |
+| 7     | SWIR 2                    | 2.11 – 2.29 µm      | 30 metros   |
+| 8     | Pancromático              | 0.50 – 0.68 µm      | 15 metros   |
+| 9     | Cirro                     | 1.36 – 1.38 µm      | 30 metros   |
+
+para la realización del informe únicamente fueron consideradas las bandas 4, 5 y 7 ; esta decisión fue tomada luego de un breve analisis inicial, no incluido en este estudio.
+
+
+Veamos ahora las imágenes mostradas por estas bandas, en un primer lugar para el mes de Septiembre, y luego para el mes de Noviembre.
+
+```{r}
+#cargo archivos de septiembre de landsat
+
+banda4sep <- rast("landsat9-septiembre/LC09_L2SP_229082_20230927_20230929_02_T1_SR_B4.TIF")
+banda5sep <- rast("landsat9-septiembre/LC09_L2SP_229082_20230927_20230929_02_T1_SR_B5.TIF")
+banda7sep <- rast("landsat9-septiembre/LC09_L2SP_229082_20230927_20230929_02_T1_SR_B7.TIF")
+plot(banda4sep)
+plot(banda5sep)
+plot(banda7sep)
+```
+
+```{r}
+#cargo archivos de noviembre de landsat
+banda4nov <- rast("landsat9-noviembre/LC08_L2SP_229082_20231122_20231128_02_T1_SR_B4.TIF")
+banda5nov <- rast("landsat9-noviembre/LC08_L2SP_229082_20231122_20231128_02_T1_SR_B5.TIF")
+banda7nov <- rast("landsat9-noviembre/LC08_L2SP_229082_20231122_20231128_02_T1_SR_B7.TIF")
+plot(banda4nov)
+plot(banda5nov)
+plot(banda7nov)
+```
+
+
+De estas imágenes podemos notar claramente, que aún habiendo seleccionado bandas especificas, las cuales aportan mayor información que las otras, igualmente por su cuenta no nos dicen mucho, por lo que para la realización de un informe claro y preciso necesitamos métricas mas relevantes.
+
+Luego de consultar distintos elementos bibliográficos, llegamos a estas 2 definiciones (en caso de precisar mayor certeza se pueden observar en los links previamente provistos), que van a ser las visualizaciones que vamos a usar de ahora en mas a lo largo de la presentacion
+
++ Landsat Normalized Difference Vegetation Index (NDVI) is used to quantify vegetation greenness and is useful in understanding vegetation density and assessing changes in plant health.
+
++ Normalized Burn Ratio (NBR) is used to identify burned areas and provide a measure of burn severity. It is calculated as a ratio between the NIR and SWIR values in traditional fashion.
+
+Pasando a español tenemos que el *NDVI* se utiliza para cuantificar la verdor de la vegetación y es útil para entender la densidad de la vegetación y evaluar cambios en la salud de las plantas. Se calcula utilizando las bandas del espectro infrarrojo cercano (NIR) y el espectro rojo, donde valores más altos indican vegetación más densa y saludable, mientras que el *NBR* se usa para identificar áreas quemadas y proporcionar una medida de la severidad de los incendios. Se calcula como una proporción entre los valores del infrarrojo cercano (NIR) y el infrarrojo de onda corta (SWIR), donde valores más bajos suelen indicar vegetación quemada o suelo desnudo después de un incendio.
+
+Luego de esta explicación se entiende la elección de las bandas 4,5 y 7 mencionadas anteriormente.
+
+```{r}
+#defino las métricas a estudiar, marco teorico lo mencionamos en la presentacion
+#Landsat Normalized Difference Vegetation Index (NDVI) is used to quantify vegetation greenness and is useful in understanding vegetation density and assessing changes in plant health.
+ndvisept <- (banda5sep - banda4sep) / (banda5sep + banda4sep)
+ndvinov <- (banda5nov - banda4nov) / (banda5nov + banda4nov)
+
+#Normalized Burn Ratio (NBR) is used to identify burned areas and provide a measure of burn severity. It is calculated as a ratio between the NIR and SWIR values in traditional fashion.
+nbrsept <- (banda5sep - banda7sep) / (banda5sep + banda7sep)
+nbrnov <- (banda5nov - banda7nov) / (banda5nov + banda7nov)
+```
+
+Una vez definidas estas variables, y vistos sus rangos de valores en los mapas, agregaremos un mayor contexto,procediendo a la carga de los archivos en formato shapefile del gobierno de la provincia de Cordoba, los cuales tienen diversos campos tales como valuación fiscal, terreno edificado, antigüedad, entre otros, datos muy interesantes pero que exceden al objetivo de este trabajo, por lo que solo consideraremos los polígonos con sus limitaciones.
+
+```{r}
+#cargo los shp 
+#san roque
+san_roque <- st_read("parcelas.shp")
+#santiago
+santiago <- st_read("parcelas2.shp")
+```
+
+```{r}
+#cambio coordenadas para q el tif y el shp esten igual
+raster_crs <- crs(banda4sep)
+shapefile_crs <- st_crs(san_roque)
+san_roque <- st_transform(san_roque, crs = raster_crs)
+santiago <- st_transform(santiago, crs = raster_crs)
+```
+
+Para facilitar el análisis,y considerando que las imágenes de landsat de septiembre y noviembre abarcaban diferentes regiones cordobesas, decidimos cropear estas métricas a sus respectivas pedanías (Santiago y San Roque) y así simplificando los cálculos, y permitiendo computar lo planeado en computadoras "comunes", sin un gran poder de cálculo.
+
+Veamos como lucen ahora estas métricas:
+
+```{r}
+#cropeo los shp 
+cropped_raster1 <- crop(ndvisept, vect(san_roque))
+masked_raster1 <- mask(cropped_raster1, vect(san_roque))
+plot(masked_raster1, main = "NDVI SEPTIEMBRE")
+plot(st_geometry(san_roque), add = TRUE, border = 'red', lwd = 0.2)
+
+cropped_raster2 <- crop(ndvinov, vect(san_roque))
+masked_raster2 <- mask(cropped_raster2, vect(san_roque))
+plot(masked_raster2, main = "NDVI NOVIEMBRE")
+plot(st_geometry(san_roque), add = TRUE, border = 'red', lwd = 0.2)
+
+cropped_raster3 <- crop(nbrsept, vect(san_roque))
+masked_raster3 <- mask(cropped_raster3, vect(san_roque))
+plot(masked_raster3, main = "NBR SEPTIEMBRE")
+plot(st_geometry(san_roque), add = TRUE, border = 'red', lwd = 0.2)
+
+cropped_raster4 <- crop(nbrnov, vect(san_roque))
+masked_raster4 <- mask(cropped_raster4, vect(san_roque))
+plot(masked_raster4, main = "NBR NOVIEMBRE")
+plot(st_geometry(san_roque), add = TRUE, border = 'red', lwd = 0.2)
+```
+
+```{r}
+cropped_raster5 <- crop(ndvisept, vect(santiago))
+masked_raster5 <- mask(cropped_raster5, vect(santiago))
+plot(masked_raster5, main = "NDVI SEPTIEMBRE")
+plot(st_geometry(santiago), add = TRUE, border = 'red', lwd = 0.2)
+
+cropped_raster6 <- crop(ndvinov, vect(santiago))
+masked_raster6 <- mask(cropped_raster6, vect(santiago))
+plot(masked_raster6, main = "NDVI NOVIEMBRE")
+plot(st_geometry(santiago), add = TRUE, border = 'red', lwd = 0.2)
+
+cropped_raster7 <- crop(nbrsept, vect(santiago))
+masked_raster7 <- mask(cropped_raster7, vect(santiago))
+plot(masked_raster7, main = "NBR SEPTIEMBRE")
+plot(st_geometry(santiago), add = TRUE, border = 'red', lwd = 0.2)
+
+cropped_raster8 <- crop(nbrnov, vect(santiago))
+masked_raster8 <- mask(cropped_raster8, vect(santiago))
+plot(masked_raster8, main = "NBR NOVIEMBRE")
+plot(st_geometry(santiago), add = TRUE, border = 'red', lwd = 0.2)
+```
+
+Como tenemos imágenes de dos meses distintos, entre los cuales se incendiaron las distintas zonas observadas, decidimos que para apreciar mejor el efecto del incendio en las parcelas consideramos relevante evaluar el cambio en los índices mencionados, al cual llamaremos delta, para así poder visualizar fácilmente aquellas regiones más y menos afectadas por el fenómeno.
+
+Por esto proseguiremos a definir las variables *DeltaNBR* y *DeltaNDVI*, y a cropearlas a las zonas de interes para el informe.
+
+```{r}
+#calculo el delta de las métricas a estudiar
+delta_nbr_san_roque <- (cropped_raster3 - cropped_raster4)
+delta_ndvi_san_roque <- (cropped_raster1 - cropped_raster2)
+
+delta_nbr_santiago <- (cropped_raster7 - cropped_raster8)
+delta_ndvi_santiago <- (cropped_raster5 - cropped_raster6)
+```
+
+```{r}
+masked_delta_nbr_san_roque <- mask(delta_nbr_san_roque, vect(san_roque))
+plot(masked_delta_nbr_san_roque, main = "DELTA NBR SAN ROQUE")
+plot(st_geometry(san_roque), add = TRUE, border = 'red', lwd = 0.2)
+
+masked_delta_ndvi_san_roque <- mask(delta_ndvi_san_roque, vect(san_roque))
+plot(masked_delta_ndvi_san_roque, main = "DELTA NVDI SAN ROQUE")
+plot(st_geometry(san_roque), add = TRUE, border = 'red', lwd = 0.2)
+
+masked_delta_nbr_santiago <- mask(delta_nbr_santiago, vect(santiago))
+plot(masked_delta_nbr_santiago, main = "DELTA NBR SANTIAGO")
+plot(st_geometry(santiago), add = TRUE, border = 'red', lwd = 0.2)
+
+masked_delta_ndvi_santiago <- mask(delta_ndvi_santiago, vect(santiago))
+plot(masked_delta_ndvi_santiago, main = "DELTA NVDI SANTIAGO")
+plot(st_geometry(santiago), add = TRUE, border = 'red', lwd = 0.2)
+```
+
+
+Una vez realizado esto, cambiaremos hacia la realización de un análisis mas profundo, y no solo exploratorio, de la data usando metodologías estudiadas a lo largo de la materia.
+
+Para esto, ante la duda, decidimos volver a cargar y realizar las transformaciones requeridas en los datos, con el fin de no haber hecho ninguna transformación extra, que hubiese "contaminado" la información requerida para este análisis.
+
+```{r}
+# Archivos de septiembre
+banda4sep <- rast("landsat9-septiembre/LC09_L2SP_229082_20230927_20230929_02_T1_SR_B4.TIF")
+banda5sep <- rast("landsat9-septiembre/LC09_L2SP_229082_20230927_20230929_02_T1_SR_B5.TIF")
+banda7sep <- rast("landsat9-septiembre/LC09_L2SP_229082_20230927_20230929_02_T1_SR_B7.TIF")
+
+
+# Archivos de noviembre
+banda4nov <- rast("landsat9-noviembre/LC08_L2SP_229082_20231122_20231128_02_T1_SR_B4.TIF")
+banda5nov <- rast("landsat9-noviembre/LC08_L2SP_229082_20231122_20231128_02_T1_SR_B5.TIF")
+banda7nov <- rast("landsat9-noviembre/LC08_L2SP_229082_20231122_20231128_02_T1_SR_B7.TIF")
+
+# NDVI
+ndvisept <- (banda5sep - banda4sep) / (banda5sep + banda4sep)
+ndvinov <- (banda5nov - banda4nov) / (banda5nov + banda4nov)
+
+# NBR
+nbrsept <- (banda5sep - banda7sep) / (banda5sep + banda7sep)
+nbrnov <- (banda5nov - banda7nov) / (banda5nov + banda7nov)
+
+san_roque <- st_read("parcelas.shp")
+santiago <- st_read("parcelas2.shp")
+
+# Transformar coordenadas al CRS del raster para cálculos espaciales
+raster_crs <- crs(banda4sep)
+san_roque <- st_transform(san_roque, crs = raster_crs)
+santiago <- st_transform(santiago, crs = raster_crs)
+
+# Eliminar geometrías vacías
+san_roque <- san_roque[!st_is_empty(san_roque),]
+santiago <- santiago[!st_is_empty(santiago),]
+
+# Convertir a WGS 84 para visualización en Leaflet
+san_roque_wgs84 <- st_transform(san_roque, crs = 4326)
+santiago_wgs84 <- st_transform(santiago, crs = 4326)
+```
+
+En un primer lugar, decidimos calcular el estadístico de Moran para nuestras muestras, así pudiendo obtener una medida de autocorrelación espacial entre las regiones de nuestro espacio de estudio, comparando contra la hipótesis nula de no autocorrelación, es decir, un proceso homogéneo .
+
+```{r}
+# Crear vecinos espaciales
+neighbors_san_roque <- poly2nb(san_roque)
+neighbors_santiago <- poly2nb(santiago)
+
+# Crear listas de pesos
+weights_san_roque <- nb2listw(neighbors_san_roque, style = "W", zero.policy = TRUE)
+weights_santiago <- nb2listw(neighbors_santiago, style = "W", zero.policy = TRUE)
+
+# Agregar coordenadas al shapefile
+san_roque$coords <- st_centroid(san_roque) %>% st_coordinates()
+santiago$coords <- st_centroid(santiago) %>% st_coordinates()
+
+# Índice de Moran para detectar autocorrelación espacial
+moran_san_roque <- moran.test(san_roque$coords[,1], listw = weights_san_roque, zero.policy = TRUE)
+moran_santiago <- moran.test(santiago$coords[,1], listw = weights_santiago, zero.policy = TRUE)
+
+# Resultados del índice de Moran
+moran_san_roque
+moran_santiago
+
+```
+
+Notamos que en ambos ejemplos de muestra (San Roque y Santiago), poseemos un p-valor muy muy cercano a cero, lo cual nos indica que la probabilidad de haber obtenido estos resultados bajo la hipotesis nula es virtualmente cero, y en este caso nos indica que, como uno tiende a intuir y pensar, la autocorrelación espacial de este fenomeno es distinta a 0, y alta.
+
+Pasaremos a visualizar las parcelas con el paquete leaflet, lo haremos en el caso de Santiago únicamente, con el fin de ejemplificar
+
+```{r}
+map_santiago <- leaflet(santiago_wgs84) %>%
+  addTiles() %>%
+  addPolygons(color = ~factor(moran_santiago$estimate[1]),
+             label = ~paste("ID:", par_idparc, "<br> Índice de Moran:", round(moran_santiago$estimate[1], 3)))
+
+map_santiago
+```
+
+Visualizamos los indices generados con las imágenes satelitales con leaflet, para que generar interactividad, y un mejor detalle al lector:
+
+
+```{r}
+cropped_raster_san_roque <- list(
+  ndvisept = mask(crop(ndvisept, vect(san_roque)), vect(san_roque)),
+  ndvinov = mask(crop(ndvinov, vect(san_roque)), vect(san_roque)),
+  nbrsept = mask(crop(nbrsept, vect(san_roque)), vect(san_roque)),
+  nbrnov = mask(crop(nbrnov, vect(san_roque)), vect(san_roque))
+)
+
+cropped_raster_santiago <- list(
+  ndvisept = mask(crop(ndvisept, vect(santiago)), vect(santiago)),
+  ndvinov = mask(crop(ndvinov, vect(santiago)), vect(santiago)),
+  nbrsept = mask(crop(nbrsept, vect(santiago)), vect(santiago)),
+  nbrnov = mask(crop(nbrnov, vect(santiago)), vect(santiago))
+)
+
+# Crear mapas interactivos de índices
+map_ndvi_nbr <- function(cropped_rasters, shapefile, title) {
+  map <- leaflet() %>%
+    addTiles() %>%
+    addRasterImage(cropped_rasters$ndvisept, colors = "Greens", opacity = 0.7, group = "NDVI Septiembre") %>%
+    addRasterImage(cropped_rasters$ndvinov, colors = "Greens", opacity = 0.7, group = "NDVI Noviembre") %>%
+    addRasterImage(cropped_rasters$nbrsept, colors = "Reds", opacity = 0.7, group = "NBR Septiembre") %>%
+    addRasterImage(cropped_rasters$nbrnov, colors = "Reds", opacity = 0.7, group = "NBR Noviembre") %>%
+    addPolygons(data = shapefile, color = "blue", weight = 1, opacity = 0.5) %>%
+    addLayersControl(
+      baseGroups = c("NDVI Septiembre", "NDVI Noviembre", "NBR Septiembre", "NBR Noviembre"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) 
+  map
+}
+santiago_wgs84 <- st_transform(santiago, crs = 4326)
+
+map_ndvi_nbr(cropped_raster_santiago, santiago_wgs84, "Santiago")
+```
+
+
+
+Prosiguiendo, realizamos un clustering de parcelas para la pedanía de Santiago (la elegimos dado que tiene menos parcelas, este método con los datos de San Roque no terminaba) considerando únicamente el *DeltaNBR*. 
+Esta decisión fue tomada en base a que consideramos que esta variable era la mejor manera de explicar el daño en el ambiente generado por los incendios.
+
+```{r}
+# Calcular delta NBR para Santiago
+delta_nbr_santiago <- (cropped_raster7 - cropped_raster8)
+
+# Aplicar máscara para Santiago
+masked_delta_nbr_santiago <- mask(delta_nbr_santiago, vect(santiago))
+
+# Extraer valores promedio para cada parcela en Santiago
+extract_mean_values <- function(delta_nbr, shapefile) {
+  delta_nbr_values <- terra::extract(delta_nbr, vect(shapefile), fun = "mean", na.rm = TRUE)
+  
+  data <- delta_nbr_values[, -1, drop = FALSE]
+  colnames(data) <- "Delta_NBR"
+  data
+}
+
+# Calcular los datos de cambio para cada parcela en Santiago
+data_santiago <- extract_mean_values(masked_delta_nbr_santiago, santiago)
+
+# Añadir la columna Delta_NBR al shapefile de Santiago
+santiago$Delta_NBR <- data_santiago$Delta_NBR
+
+# Convertir a DataFrame para usar en clustering
+santiago_df <- as.data.frame(st_coordinates(st_centroid(santiago)))
+colnames(santiago_df) <- c("X", "Y")
+
+# Concatenar datos espaciales y delta NBR
+santiago_data <- cbind(santiago_df, data_santiago)
+
+# Función para realizar clustering y crear mapa
+create_cluster_map <- function(data, k) {
+  set.seed(123)  # Para reproducibilidad
+  
+  # Clustering usando k-means
+  clust <- kmeans(data[, "Delta_NBR", drop = FALSE], centers = k)
+  
+  # Añadir información de cluster al objeto sf original
+  santiago$cluster <- as.factor(clust$cluster)
+  
+  # Convertir a WGS 84 para visualización en Leaflet
+  santiago_wgs84 <- st_transform(santiago, crs = 4326)
+  
+  # Crear el mapa interactivo de clusters
+  map <- leaflet(santiago_wgs84) %>%
+    addTiles() %>%
+    addPolygons(color = ~colorFactor(topo.colors(k), cluster)(cluster),
+                label = ~paste("ID:", par_idparc, "<br> Cluster:", cluster,
+                               "<br> Delta NBR:", round(Delta_NBR, 4))) %>%
+    addLegend(pal = colorFactor(topo.colors(k), santiago_wgs84$cluster), values = ~cluster,
+              title = paste(k, "Clusters"), opacity = 1)
+  
+  return(map)
+}
+
+# Crear mapas para 2, 3 y 4 clusters
+map_2_clusters <- create_cluster_map(santiago_data, 2)
+map_3_clusters <- create_cluster_map(santiago_data, 3)
+map_4_clusters <- create_cluster_map(santiago_data, 4)
+
+# Mostrar los mapas
+map_2_clusters
+map_3_clusters
+map_4_clusters
+
+```
+
+Luego, a modo de comparación, realizamos lo mismo considerando además,la correlación espacial entre las parcelas (aquellas parcelas que no tenian vecinos fueron excluidas porque el método utilizado,al no poder definir la vecindad retornaba error al buscar esto mismo). 
+
+```{r}
+# Calculate delta NBR for Santiago
+delta_nbr_santiago <- (cropped_raster7 - cropped_raster8)
+
+# Apply mask for Santiago
+masked_delta_nbr_santiago <- mask(delta_nbr_santiago, vect(santiago))
+
+# Extract mean values for each parcel in Santiago
+extract_mean_values <- function(delta_nbr, shapefile) {
+  delta_nbr_values <- terra::extract(delta_nbr, vect(shapefile), fun = mean, na.rm = TRUE)
+  
+  data <- delta_nbr_values[, 2, drop = FALSE]  # Select only the second column (the extracted values)
+  names(data) <- "Delta_NBR"
+  data
+}
+
+# Calculate change data for each parcel in Santiago
+data_santiago <- extract_mean_values(masked_delta_nbr_santiago, santiago)
+
+# Combine spatial data with extracted values
+santiago$Delta_NBR <- data_santiago$Delta_NBR
+
+# Create spatial weights with a more lenient approach
+santiago_nb <- poly2nb(santiago, queen = TRUE)
+
+# Check for empty neighbor sets
+empty_nb <- which(card(santiago_nb) == 0)
+if (length(empty_nb) > 0) {
+  print(paste("Polygons with no neighbors:", paste(empty_nb, collapse = ", ")))
+  
+  # Remove polygons with no neighbors
+  santiago <- santiago[-empty_nb, ]
+  santiago_nb <- poly2nb(santiago, queen = TRUE)
+}
+
+# Create weights
+santiago_weights <- nb2listw(santiago_nb, style = "W", zero.policy = TRUE)
+
+# Calculate spatial lag variables
+santiago$lag_Delta_NBR <- lag.listw(santiago_weights, santiago$Delta_NBR, zero.policy = TRUE)
+
+# Calculate Moran's I for spatial autocorrelation
+moran_nbr <- moran.test(santiago$Delta_NBR, santiago_weights, zero.policy = TRUE)
+print(paste("Moran's I for Delta NBR:", moran_nbr$estimate[1]))
+
+# Prepare data for clustering
+cluster_data <- st_drop_geometry(santiago) %>%
+  select(Delta_NBR, lag_Delta_NBR)
+
+# Function to create cluster map
+create_cluster_map <- function(data, k) {
+  set.seed(123)  # For reproducibility
+  
+  # Clustering using PAM
+  clust <- pam(cluster_data, k)
+  
+  # Add cluster information to the original sf object
+  data$cluster <- as.factor(clust$clustering)
+  
+  # Convert to WGS 84 for visualization in Leaflet
+  data_wgs84 <- st_transform(data, crs = 4326)
+  
+  # Create interactive cluster map
+  map <- leaflet(data_wgs84) %>%
+    addTiles() %>%
+    addPolygons(color = ~colorFactor(topo.colors(k), cluster)(cluster),
+                label = ~paste("ID:", par_idparc, "<br> Cluster:", cluster,
+                               "<br> Delta NBR:", round(Delta_NBR, 4))) %>%
+    addLegend(pal = colorFactor(topo.colors(k), data_wgs84$cluster), values = ~cluster,
+              title = paste(k, "Clusters"), opacity = 1)
+  
+  return(map)
+}
+
+# Create maps for 2, 3, and 4 clusters
+map_2_clusters <- create_cluster_map(santiago, 2)
+map_3_clusters <- create_cluster_map(santiago, 3)
+map_4_clusters <- create_cluster_map(santiago, 4)
+
+# Display the maps
+map_2_clusters
+map_3_clusters
+map_4_clusters
+
+```
+
+En efecto los clusters obtenidos incorporando la componente espacial fue similar los que no la poseían. Esto se observa sobretodo en el clusterizado con K=2, donde exceptuando la región superior izquierda resultan muy similares los mapas. 
+
+Esto parece indicarnos que la información contenida por la variable *DeltaNBR* posee una componente espacial muy influyente, debido a que se observan clusters similares, generados tanto con información espacial, como sin. Apoyando esta conclusión tambien aparece lo mencionado anteriormente, a la hora de realizar en estadístico de Moran, pues vimos que había una alta correlación espacial, lo cual marca que existe información espacial en el resto de las variables, en este caso, la tomada para realizar los clusters en un principio.
+
+Otro punto interesante de esta visualización es el poder observar el promedio de *DeltaNBR* en el mapa, lo cual consideramos muy util.
+
+
+Por ultimo pasaremos a visualizar un scatter plot de las parcelas de Santiago, donde en un eje encontraremos a *DeltaNBR*, y en el otro a los pesos utilizados para generar los clusters con la información espacial asociada. Ádemas, se encuentra graficada la recta de regresión lineal obtenida con estas variables. 
+
+```{r}
+
+# Calculate Moran's I
+moran_result <- moran.test(santiago$Delta_NBR, santiago_weights, zero.policy = TRUE)
+
+# Create Moran's I scatter plot
+moran_plot <- moran.plot(santiago$Delta_NBR, santiago_weights, zero.policy = TRUE,
+                         labels = santiago$par_idparc, pch = 19,xlab = "Delta NBR",ylab = "Delta NBR, contextualizado espacialmente")
+title("Scatterplot comparativo, con variables utilizada en clustering")
+
+# Add regression line
+abline(lm(moran_plot$wx ~ moran_plot$x), col = "red")
+
+
+```
+
+
+Lo que se nota muy claramente, es que en efecto, ocurre lo mencionado anteriormente, y poseen una notable correlación espacial positiva.
+
